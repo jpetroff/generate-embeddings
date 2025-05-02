@@ -197,6 +197,13 @@ if __name__ == "__main__":
         chunk_overlap=Settings.chunk_overlap
         )
     
+    vector_store_index = VectorStoreIndex.from_vector_store(
+        vector_store=vector_store, embed_model=Settings.embed_model,
+        store_nodes_override=True
+        )
+    vector_store_index.refresh()
+    print(vector_store_index.ref_doc_info)
+    
     try:
         storage_context = StorageContext.from_defaults(
             vector_store=vector_store,
@@ -205,7 +212,7 @@ if __name__ == "__main__":
     except:
         storage_context = StorageContext.from_defaults(
             vector_store=vector_store
-        ).persist(persist_dir='./store')
+        )
 
 
     # file_index_source = open('./store/file_index.json', 'r+')

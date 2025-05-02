@@ -1,3 +1,4 @@
+llama-index
 llama-index-core
 llama-index-embeddings-fastembed
 llama-index-embeddings-huggingface

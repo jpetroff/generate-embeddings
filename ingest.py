@@ -83,8 +83,9 @@ class BaseIngestComponentWithIndex(BaseIngestComponent, abc.ABC):
         except ValueError:
             # There are no index in the storage context, creating a new one
             logger.info("Creating a new vector store index")
-            index = VectorStoreIndex.from_documents(
-                [],
+            # index = VectorStoreIndex.from_documents(
+            index = VectorStoreIndex.from_vector_store(
+                vector_store=self.storage_context.vector_store,
                 storage_context=self.storage_context,
                 store_nodes_override=True,  # Force store nodes in index and document stores
                 show_progress=self.show_progress,
