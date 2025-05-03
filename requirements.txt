@@ -9,6 +9,8 @@ llama-index-readers-file
 llama-index-readers-web
 llama-index-tools-duckduckgo
 llama-index-vector-stores-qdrant
+llama-index-storage-docstore-mongodb
+llama-index-storage-index-store-mongodb
 pydantic
 dotenv
 rich

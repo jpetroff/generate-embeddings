@@ -21,6 +21,8 @@ from llama_index.core import Settings
 from llama_index.core.storage.index_store.simple_index_store import SimpleIndexStore
 from llama_index.core.storage.docstore import SimpleDocumentStore
 from llama_index.core.indices.vector_store import VectorStoreIndex
+from llama_index.storage.docstore.mongodb import MongoDocumentStore
+from llama_index.storage.index_store.mongodb import MongoIndexStore
 
 from llama_index.vector_stores.qdrant import QdrantVectorStore
 import qdrant_client
@@ -34,6 +36,7 @@ from rich.status import Status
 from rich.logging import RichHandler
 
 from ingest import SimpleIngestComponent, ParallelizedIngestComponent
+from ingest_pipeline import IngestPipelineComponent
 from callback import event_callback
 
 class user_config:
@@ -142,7 +145,7 @@ if __name__ == "__main__":
     logger = logging.getLogger('generate-app')
 
     """
-    Connect to storage    
+    Connect to vector storage    
     -------------------------------------------------------
     """
     try:
@@ -176,6 +179,25 @@ if __name__ == "__main__":
         index_doc_id=True
     )
 
+    """
+    Connect to document and index storage
+    -------------------------------------------------------
+    """
+
+    try:
+        doc_store = MongoDocumentStore.from_uri(
+            uri=env['MONGO_URI'] or '',
+            db_name=env['MONGO_DB'] or '',
+            namespace=env['MONGO_NAMESPACE'] or ''
+        )
+        index_store = MongoIndexStore.from_uri(
+            uri=env['MONGO_URI'] or '',
+            db_name=env['MONGO_DB'] or '',
+            namespace=env['MONGO_NAMESPACE'] or ''
+        )
+    except:
+        exit(1)
+
     Settings.embed_model = OllamaEmbedding(
         model_name=env['EMBED_MODEL'] or '', 
         base_url=env['OLLAMA_URL'] or ''
@@ -191,57 +213,34 @@ if __name__ == "__main__":
     # #     buffer_size=96,
     # #     include_metadata=True
     # #     )
+    
 
     node_parser = TokenTextSplitter.from_defaults(
         chunk_size=Settings.chunk_size,
         chunk_overlap=Settings.chunk_overlap
-        )
+    )
     
     vector_store_index = VectorStoreIndex.from_vector_store(
         vector_store=vector_store, embed_model=Settings.embed_model,
         store_nodes_override=True
-        )
-    vector_store_index.refresh()
-    print(vector_store_index.ref_doc_info)
-    
-    try:
-        storage_context = StorageContext.from_defaults(
-            vector_store=vector_store,
-            persist_dir='./store'
-        )
-    except:
-        storage_context = StorageContext.from_defaults(
-            vector_store=vector_store
-        )
+    )
 
+    storage_context = StorageContext.from_defaults(
+        vector_store=vector_store,
+        docstore=doc_store,
+        index_store=index_store
+    )
 
-    # file_index_source = open('./store/file_index.json', 'r+')
-    # file_index: Any = {}
-    # file_index = json.loads(file_index_source.read())
-    # file_index_source.close()
-    # # try:
-    # #     file_index = json.loads(file_index_source.read())
-    # # except Exception:
-    # #     print(str(Exception))
-    # #     print("Initialized new index...")
-
-
-
-    event_callback.__kwdefaults__ = {
-        'qdrant_client': client,
-        'qdrant_collection': env['QDRANT_COLLECTION']
-    }
-
-    assert storage_context is not None, print("[[red]×[/]] Failed to initialise storage context")
-    ingest_service = ParallelizedIngestComponent(
+    ingest_service = IngestPipelineComponent(
         storage_context=storage_context, 
         embed_model=Settings.embed_model,
-        transformations=[node_parser, Settings.embed_model],
-        count_workers=8,
-        callback=event_callback
-        )
+        transformations=[node_parser, Settings.embed_model]
+    )
+
     try:
-        directory_reader = SimpleDirectoryReader(input_dir=user_config.ingest_directory)
+        directory_reader = SimpleDirectoryReader(
+            input_dir=user_config.ingest_directory
+        )
         files_to_ingest = directory_reader.input_files
         file_list = [f.name for f in files_to_ingest]
         inquirer.checkbox(
@@ -251,15 +250,10 @@ if __name__ == "__main__":
             )
 
         documents = ingest_service.bulk_ingest(
-            files=[(str(p.name), Path(p)) for p in files_to_ingest],
-            callback=event_callback
-            )
+            files=[(str(p.name), Path(p)) for p in files_to_ingest]
+        )
         
     finally:
-        pass
-        # del ingest_service
-    
-    #     file_index_source = open('./store/file_index.json', 'w+')
-    #     file_index_source.write(json.dumps(file_index, indent=4))
-    #     file_index_source.close()
-    
+        del ingest_service
+
+    print("Done")
