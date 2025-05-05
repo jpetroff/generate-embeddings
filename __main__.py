@@ -35,8 +35,8 @@ from rich.live import Live
 from rich.status import Status
 from rich.logging import RichHandler
 
-from ingest import SimpleIngestComponent, ParallelizedIngestComponent
-from ingest_pipeline import IngestPipelineComponent
+# from ingest.old import SimpleIngestComponent, ParallelizedIngestComponent
+from ingest import IngestPipelineComponent
 from callback import event_callback
 
 class user_config:
@@ -188,12 +188,12 @@ if __name__ == "__main__":
         doc_store = MongoDocumentStore.from_uri(
             uri=env['MONGO_URI'] or '',
             db_name=env['MONGO_DB'] or '',
-            namespace=env['MONGO_NAMESPACE'] or ''
+            namespace=env['QDRANT_COLLECTION'] or ''
         )
         index_store = MongoIndexStore.from_uri(
             uri=env['MONGO_URI'] or '',
             db_name=env['MONGO_DB'] or '',
-            namespace=env['MONGO_NAMESPACE'] or ''
+            namespace=env['QDRANT_COLLECTION'] or ''
         )
     except:
         exit(1)
@@ -213,7 +213,7 @@ if __name__ == "__main__":
     # #     buffer_size=96,
     # #     include_metadata=True
     # #     )
-    
+
 
     node_parser = TokenTextSplitter.from_defaults(
         chunk_size=Settings.chunk_size,
