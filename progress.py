@@ -20,7 +20,7 @@ import tqdm.auto
 class ExtTqdm(tqdm_asyncio):
     def __init__(self, iterable=None, *args, **kwargs):
         super().__init__(iterable, *args, **kwargs)
-        print('Updated with custom TQDM')
+        # print('Updated with custom TQDM')
         self._is_modified = True
 
 tqdm.asyncio.tqdm_asyncio = ExtTqdm

@@ -1,5 +1,6 @@
 from ast import Call
 import asyncio
+from math import inf
 import multiprocessing
 import multiprocessing.pool
 import itertools
@@ -14,6 +15,9 @@ from hashlib import sha256
 from itertools import repeat
 from pathlib import Path
 from typing import Any, Callable, Generator, List, Optional, Sequence, Union, Dict
+import sys
+import queue
+import threading
 
 from fsspec import AbstractFileSystem
 
@@ -96,7 +100,7 @@ class IngestionStep(BaseModel):
         super().__init__(
             transform=transform,
             name=name,
-            threads=None,
+            threads=threads,
             **kwargs
         )
 
@@ -131,6 +135,27 @@ def iterable_wrapper(nodes: Sequence[BaseNode]):
     for node in nodes:
         yield node
 
+def _process_worker(step, nodes, kwargs, output_queue):
+    """Worker function that captures stdout and sends it to the queue."""
+    # Redirect stdout to a StringIO
+    from io import StringIO
+    old_stdout = sys.stdout
+    sys.stdout = mystdout = StringIO()
+    
+    try:
+        # Run the step
+        result = step(nodes, **kwargs)
+        
+        # Get the captured output
+        output = mystdout.getvalue()
+        if output:
+            output_queue.put(output)
+            
+        return result
+    finally:
+        # Restore stdout
+        sys.stdout = old_stdout
+
 def run_step(
     nodes: Sequence[BaseNode],
     step: IngestionStep,
@@ -143,12 +168,12 @@ def run_step(
 ) -> Sequence[BaseNode]:
 
     num_nodes = len(nodes)
-    num_workers = step.threads or num_workers
+    num_workers = min(int(step.threads or inf), num_workers)
     is_multiprocessing = num_nodes > 1 and num_workers > 1
 
     transform = step.transform
 
-    # print(f"{step.name} → {min(num_nodes, num_workers)}")
+    print(f"Step {step.name} | {num_workers} threads ({step.threads} step threads) | {num_nodes} nodes")
 
     hash: str = ''
     if cache is not None:
@@ -159,23 +184,43 @@ def run_step(
             return nodes
     
     if is_multiprocessing:
+        # Create a manager for sharing the queue
+        manager = multiprocessing.Manager()
+        output_queue = manager.Queue()
+        
+        # Start a thread to process the output queue
+        def process_output():
+            while True:
+                try:
+                    output = output_queue.get_nowait()
+                    print(output, end='', flush=True)
+                except queue.Empty:
+                    break
+        
+        output_thread = threading.Thread(target=process_output)
+        output_thread.start()
+        
         step_work_pool = multiprocessing.Pool(num_workers)
 
         node_batches = ExtIngestionPipeline._node_batcher(
             num_batches=num_workers, nodes=nodes
         )
         
+        # Create partial function with the output queue
+        worker_func = partial(_process_worker, step, kwargs=kwargs, output_queue=output_queue)
+        
         nodes = list(
             itertools.chain.from_iterable(
                 step_work_pool.starmap(
-                    step,
-                    zip(
-                        node_batches,
-                        repeat(kwargs)
-                    )
+                    worker_func,
+                    zip(node_batches)
                 )
             )
         )
+        
+        # Wait for output processing to complete
+        output_thread.join()
+        
     else: 
         nodes = transform(nodes, **kwargs)
 
@@ -362,7 +407,7 @@ class ExtIngestionPipeline(BaseModel):
                 nodes_to_run.append(node)
                 current_hashes.append(node.hash)
 
-        self.docstore.add_documents(nodes_to_run, store_text=store_doc_text)
+        #self.docstore.add_documents(nodes_to_run, store_text=store_doc_text)
 
         return nodes_to_run
     
