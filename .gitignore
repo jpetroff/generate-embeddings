@@ -3,6 +3,7 @@ data/*
 append/*
 store/*
 .*env*
+.dump/*
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

@@ -13,7 +13,7 @@ from functools import partial, reduce
 from hashlib import sha256
 from itertools import repeat
 from pathlib import Path
-from typing import Any, Callable, Generator, List, Optional, Sequence, Union
+from typing import Any, Callable, Generator, List, Optional, Sequence, Union, Dict
 
 from fsspec import AbstractFileSystem
 
@@ -61,10 +61,6 @@ def remove_unstable_values(s: str) -> str:
     pattern = r"<[\w\s_\. ]+ at 0x[a-z0-9]+>"
     return re.sub(pattern, "", s)
 
-def unpack_kwargs(f, nodes, kwargs):
-    """mappable wrapper to unpack kwargs and pass them to f"""
-    return f(nodes, **kwargs)
-
 def get_transformation_hash(
     nodes: Sequence[BaseNode], transformation: TransformComponent
 ) -> str:
@@ -87,8 +83,31 @@ class IngestionStep(BaseModel):
         description="Transformation step", 
     )
     threads: Optional[int] = Field(
-        default=None, description="Run in parallel threads (if > 1)"
+        default=None, description="Run in parallel threads (if > 1), None means global num_workers value is applied"
     )
+
+    def __init__(
+        self,
+        transform: TransformComponent,
+        name: str = 'Generic Transformation Step',
+        threads: Optional[int] = None,
+        **kwargs
+    ):
+        super().__init__(
+            transform=transform,
+            name=name,
+            threads=None,
+            **kwargs
+        )
+
+    def __call__(
+        self,
+        *args,
+        **kwargs
+    ) -> Sequence[BaseNode]:
+        nodes: Sequence[BaseNode] = args[0]
+        _kwargs: Dict[str, Any] = args[1] if len(args) > 1 else {}
+        return self.transform(nodes, **_kwargs, **kwargs)
 
 class IngestionStrategy(str, Enum):
     """
@@ -108,6 +127,10 @@ class IngestionStrategy(str, Enum):
     DUPLICATES_ONLY = "duplicates_only"
     UPSERTS_AND_DELETE = "upserts_and_delete"
 
+def iterable_wrapper(nodes: Sequence[BaseNode]):
+    for node in nodes:
+        yield node
+
 def run_step(
     nodes: Sequence[BaseNode],
     step: IngestionStep,
@@ -118,7 +141,6 @@ def run_step(
     num_workers: int = 1,
     **kwargs: Any,
 ) -> Sequence[BaseNode]:
-    assert callable(step.transform)
 
     num_nodes = len(nodes)
     num_workers = step.threads or num_workers
@@ -126,7 +148,7 @@ def run_step(
 
     transform = step.transform
 
-    print(f"{step.name} → {min(num_nodes, num_workers)}")
+    # print(f"{step.name} → {min(num_nodes, num_workers)}")
 
     hash: str = ''
     if cache is not None:
@@ -137,7 +159,7 @@ def run_step(
             return nodes
     
     if is_multiprocessing:
-        step_work_pool = multiprocessing.get_context("spawn").Pool(num_workers)
+        step_work_pool = multiprocessing.Pool(num_workers)
 
         node_batches = ExtIngestionPipeline._node_batcher(
             num_batches=num_workers, nodes=nodes
@@ -146,9 +168,8 @@ def run_step(
         nodes = list(
             itertools.chain.from_iterable(
                 step_work_pool.starmap(
-                    unpack_kwargs,
+                    step,
                     zip(
-                        repeat(transform),
                         node_batches,
                         repeat(kwargs)
                     )
@@ -466,6 +487,9 @@ class ExtIngestionPipeline(BaseModel):
         else:
             nodes_to_run = input_nodes
 
+        # @TODO: remove, used for debugging
+        nodes_to_run = input_nodes
+
         for step in self.steps:
             nodes_to_run = run_step(
                 nodes=nodes_to_run,
@@ -474,7 +498,8 @@ class ExtIngestionPipeline(BaseModel):
                 _parent_name=self.name,
                 cache=self.cache,
                 cache_collection=cache_collection,
-                num_workers=num_workers
+                num_workers=num_workers,
+                show_progress=True
             )
 
         if self.vector_store is not None:

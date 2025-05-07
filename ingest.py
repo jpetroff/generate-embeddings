@@ -23,6 +23,7 @@ from pipeline import ExtIngestionPipeline, IngestionStep, IngestionStrategy
 from typing import List
 
 from rich import print
+from rich.status import Status
 
 from reader import Reader
 
@@ -82,11 +83,17 @@ class IngestPipelineComponent(BaseIngestComponent):
     def bulk_ingest(self, files: list[tuple[str, Path]]) -> list[Document]:
         saved_documents: list[Document] = []
         for file_name, file_path in files:
+            print(f"Reading file {file_name}")
             documents = self.ingest(
                 file_name=file_name,
                 file_path=file_path
             )
-            saved_documents.extend(self._save_docs(documents))
+            print(f"{file_name} → {len(documents)} documents")
+
+            # ↓ Actual processing here 
+            saved_documents.extend(
+                self._save_docs(documents)
+            )
         return saved_documents
 
     def _save_docs(self, documents: list[Document]) -> list[Document]:
