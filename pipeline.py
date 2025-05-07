@@ -54,6 +54,8 @@ from llama_index.core.utils import concat_dirs
 from llama_index.core.vector_stores.types import BasePydanticVectorStore
 from sqlalchemy import func
 
+from rich import print
+
 def remove_unstable_values(s: str) -> str:
     """
     Remove unstable key/value pairs.
@@ -187,7 +189,7 @@ def run_step(
         # Create a manager for sharing the queue
         manager = multiprocessing.Manager()
         output_queue = manager.Queue()
-        
+
         # Start a thread to process the output queue
         def process_output():
             while True:
