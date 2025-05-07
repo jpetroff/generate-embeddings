@@ -20,6 +20,10 @@ import tqdm.asyncio
 import tqdm.auto
 import sys
 
+
+
+SHR_NODE_ID_NAME = 'pipeline_share_node_id_progress'
+
 class ExtTqdm(tqdm_asyncio):
     def __init__(self, iterable=None, *args, **kwargs):
         super().__init__(iterable, disable=True, *args, **kwargs)
@@ -33,7 +37,9 @@ class ExtTqdm(tqdm_asyncio):
         iterable = self.iterable
 
         for obj in iterable:
-            sys.stdout.write(str(obj)+"\n")
+            if 'SHARED_QUEUE' in globals() and SHARED_QUEUE is not None: # type: ignore
+                SHARED_QUEUE.put(str(obj)+"\n") # type: ignore
+
             yield obj
 
 tqdm.asyncio.tqdm_asyncio = ExtTqdm

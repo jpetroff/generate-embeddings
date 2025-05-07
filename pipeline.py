@@ -2,6 +2,7 @@ from ast import Call
 import asyncio
 from math import inf
 import multiprocessing
+from multiprocessing import shared_memory, Array
 import multiprocessing.pool
 import itertools
 import os
@@ -14,12 +15,15 @@ from functools import partial, reduce
 from hashlib import sha256
 from itertools import repeat
 from pathlib import Path
-from typing import Any, Callable, Generator, List, Optional, Sequence, Union, Dict
+from typing import Any, Callable, Generator, List, Optional, Sequence, Union, Dict, TypeVar, Iterator
 import sys
 import queue
 import threading
+from collections.abc import Sequence as ABCSequence
 
 from fsspec import AbstractFileSystem
+
+from progress import SHR_NODE_ID_NAME
 
 from llama_index.core.constants import (
     DEFAULT_PIPELINE_NAME,
@@ -54,7 +58,46 @@ from llama_index.core.utils import concat_dirs
 from llama_index.core.vector_stores.types import BasePydanticVectorStore
 from sqlalchemy import func
 
-from rich import print
+import rich
+
+T = TypeVar('T', bound=BaseNode)
+
+class NodeTrackingSequence(ABCSequence[T]):
+    """A sequence wrapper that tracks node IDs during iteration."""
+    
+    def __init__(self, sequence: Sequence[T], callback: Optional[Callable[[BaseNode], None]]):
+        self._callback = callback
+        self._sequence = sequence
+        
+    def __iter__(self) -> Iterator[T]:
+        """Iterate over the sequence while tracking node IDs."""
+        for node in self._sequence:
+            if callable(self._callback):
+                self._callback(node)
+            yield node
+            
+    def __len__(self) -> int:
+        return len(self._sequence)
+        
+    def __getitem__(self, idx: Union[int, slice]) -> Union[T, 'NodeTrackingSequence[T]']:  # type: ignore
+        if isinstance(idx, slice):
+            return NodeTrackingSequence(self._sequence[idx], self._callback)
+        return self._sequence[idx]
+        
+    def __contains__(self, item: object) -> bool:
+        return item in self._sequence
+        
+    def __reversed__(self) -> Iterator[T]:
+        for node in reversed(self._sequence):
+            if callable(self._callback):
+                self._callback(node)
+            yield node
+            
+    def index(self, value: T, start: int = 0, stop: Optional[int] = None) -> int:
+        return self._sequence.index(value, start, stop or len(self._sequence))
+        
+    def count(self, value: T) -> int:
+        return self._sequence.count(value)
 
 def remove_unstable_values(s: str) -> str:
     """
@@ -137,26 +180,35 @@ def iterable_wrapper(nodes: Sequence[BaseNode]):
     for node in nodes:
         yield node
 
-def _process_worker(step, nodes, kwargs, output_queue):
+def _process_worker(step, nodes, kwargs, output_queue: queue.Queue):
     """Worker function that captures stdout and sends it to the queue."""
     # Redirect stdout to a StringIO
-    from io import StringIO
-    old_stdout = sys.stdout
-    sys.stdout = mystdout = StringIO()
-    
-    try:
+    # from io import StringIO
+    # old_stdout = sys.stdout
+    # sys.stdout = mystdout = StringIO()
+
+    def _callback(node: BaseNode):
+        output_queue.put(node.id_)
+
+    # try:
         # Run the step
-        result = step(nodes, **kwargs)
+    trackable_nodes = NodeTrackingSequence(nodes, _callback)
+    result = step(trackable_nodes, **kwargs)
         
         # Get the captured output
-        output = mystdout.getvalue()
-        if output:
-            output_queue.put(output)
-            
-        return result
-    finally:
+        # output = mystdout.getvalue()
+        # if output:
+        #     output_queue.put(output)
+    
+    output_queue.put("\0")
+    if hasattr(result, '_sequence'):
+        return result._sequence
+
+    return result 
+    # finally:
+    #     del trackable_nodes
         # Restore stdout
-        sys.stdout = old_stdout
+        # sys.stdout = old_stdout
 
 def run_step(
     nodes: Sequence[BaseNode],
@@ -194,10 +246,13 @@ def run_step(
         def process_output():
             while True:
                 try:
-                    output = output_queue.get_nowait()
-                    print(output, end='', flush=True)
+                    output = output_queue.get()
+                    if output == "\0":
+                        break
+                    
+                    rich.print(output, end='')
                 except queue.Empty:
-                    break
+                    continue
         
         output_thread = threading.Thread(target=process_output)
         output_thread.start()
@@ -221,7 +276,7 @@ def run_step(
         )
         
         # Wait for output processing to complete
-        output_thread.join()
+        
         
     else: 
         nodes = transform(nodes, **kwargs)
