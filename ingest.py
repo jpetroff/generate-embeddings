@@ -27,6 +27,8 @@ from rich.status import Status
 
 from reader import Reader
 
+from progress import progress_relay, global_console
+
 logger = logging.getLogger('generate-app')
 
 class BaseIngestComponent(abc.ABC):
@@ -83,17 +85,23 @@ class IngestPipelineComponent(BaseIngestComponent):
     def bulk_ingest(self, files: list[tuple[str, Path]]) -> list[Document]:
         saved_documents: list[Document] = []
         for file_name, file_path in files:
-            print(f"Reading file {file_name}")
+            progress_relay.init_step_context(
+                console=global_console,
+                status=f"Reading file {file_name}"
+            )
             documents = self.ingest(
                 file_name=file_name,
                 file_path=file_path
             )
-            print(f"{file_name} → {len(documents)} documents")
+            progress_relay.update_status(f"Generating embeddings {file_name}")
 
             # ↓ Actual processing here 
+            returned_documents = self._save_docs(documents)
             saved_documents.extend(
-                self._save_docs(documents)
+                returned_documents
             )
+            progress_relay.end_step_context()
+            global_console.print(f"[[green]✓[/]]Completed {file_name}")
         return saved_documents
 
     def _save_docs(self, documents: list[Document]) -> list[Document]:

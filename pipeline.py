@@ -1,45 +1,27 @@
-from ast import Call
-import asyncio
 from math import inf
 import multiprocessing
-from multiprocessing import shared_memory, Array
 import multiprocessing.pool
 import itertools
-import os
-from platform import node
-import re
-import warnings
-from concurrent.futures import ProcessPoolExecutor
 from enum import Enum
 from functools import partial, reduce
-from hashlib import sha256
 from itertools import repeat
+from os import wait
 from pathlib import Path
-from typing import Any, Callable, Generator, List, Optional, Sequence, Union, Dict, TypeVar, Iterator
-import sys
+from time import sleep
+import trace
+from typing import Any, Callable, Generator, List, Optional, Sequence, Union, Dict
 import queue
 import threading
-from collections.abc import Sequence as ABCSequence
+import traceback
 
 from fsspec import AbstractFileSystem
-
-from progress import SHR_NODE_ID_NAME
 
 from llama_index.core.constants import (
     DEFAULT_PIPELINE_NAME,
     DEFAULT_PROJECT_NAME,
 )
-# from llama_index.core.bridge.pydantic import (
-#     AnyUrl,
-#     BaseModel,
-#     BaseComponent,
-#     ConfigDict,
-#     Field
-# )
 from llama_index.core.bridge.pydantic import BaseModel, Field, ConfigDict
 from llama_index.core.ingestion.cache import DEFAULT_CACHE_NAME, IngestionCache
-from llama_index.core.instrumentation import get_dispatcher
-from llama_index.core.node_parser import SentenceSplitter
 from llama_index.core.readers.base import ReaderConfig
 from llama_index.core.schema import (
     BaseNode,
@@ -50,78 +32,18 @@ from llama_index.core.schema import (
 )
 from llama_index.core.settings import Settings
 from llama_index.core.storage.docstore import (
-    BaseDocumentStore,
-    SimpleDocumentStore,
+    BaseDocumentStore
 )
 from llama_index.core.storage.docstore.types import DEFAULT_PERSIST_FNAME
 from llama_index.core.utils import concat_dirs
 from llama_index.core.vector_stores.types import BasePydanticVectorStore
-from sqlalchemy import func
 
 import rich
 
-T = TypeVar('T', bound=BaseNode)
+from node_tracking_sequence import NodeTrackingSequence
+from utils import EOQUEUE_SYMBOL, get_transformation_hash
 
-class NodeTrackingSequence(ABCSequence[T]):
-    """A sequence wrapper that tracks node IDs during iteration."""
-    
-    def __init__(self, sequence: Sequence[T], callback: Optional[Callable[[BaseNode], None]]):
-        self._callback = callback
-        self._sequence = sequence
-        
-    def __iter__(self) -> Iterator[T]:
-        """Iterate over the sequence while tracking node IDs."""
-        for node in self._sequence:
-            if callable(self._callback):
-                self._callback(node)
-            yield node
-            
-    def __len__(self) -> int:
-        return len(self._sequence)
-        
-    def __getitem__(self, idx: Union[int, slice]) -> Union[T, 'NodeTrackingSequence[T]']:  # type: ignore
-        if isinstance(idx, slice):
-            return NodeTrackingSequence(self._sequence[idx], self._callback)
-        return self._sequence[idx]
-        
-    def __contains__(self, item: object) -> bool:
-        return item in self._sequence
-        
-    def __reversed__(self) -> Iterator[T]:
-        for node in reversed(self._sequence):
-            if callable(self._callback):
-                self._callback(node)
-            yield node
-            
-    def index(self, value: T, start: int = 0, stop: Optional[int] = None) -> int:
-        return self._sequence.index(value, start, stop or len(self._sequence))
-        
-    def count(self, value: T) -> int:
-        return self._sequence.count(value)
-
-def remove_unstable_values(s: str) -> str:
-    """
-    Remove unstable key/value pairs.
-
-    Examples include:
-    - <__main__.Test object at 0x7fb9f3793f50>
-    - <function test_fn at 0x7fb9f37a8900>
-    """
-    pattern = r"<[\w\s_\. ]+ at 0x[a-z0-9]+>"
-    return re.sub(pattern, "", s)
-
-def get_transformation_hash(
-    nodes: Sequence[BaseNode], transformation: TransformComponent
-) -> str:
-    """Get the hash of a transformation."""
-    nodes_str = "".join(
-        [str(node.get_content(metadata_mode=MetadataMode.ALL)) for node in nodes]
-    )
-
-    transformation_dict = transformation.to_dict()
-    transform_string = remove_unstable_values(str(transformation_dict))
-
-    return sha256((nodes_str + transform_string).encode("utf-8")).hexdigest()
+from progress import progress_relay, global_console
 
 class IngestionStep(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -151,12 +73,10 @@ class IngestionStep(BaseModel):
 
     def __call__(
         self,
-        *args,
+        nodes,
         **kwargs
     ) -> Sequence[BaseNode]:
-        nodes: Sequence[BaseNode] = args[0]
-        _kwargs: Dict[str, Any] = args[1] if len(args) > 1 else {}
-        return self.transform(nodes, **_kwargs, **kwargs)
+        return self.transform(nodes, **kwargs)
 
 class IngestionStrategy(str, Enum):
     """
@@ -176,48 +96,40 @@ class IngestionStrategy(str, Enum):
     DUPLICATES_ONLY = "duplicates_only"
     UPSERTS_AND_DELETE = "upserts_and_delete"
 
-def iterable_wrapper(nodes: Sequence[BaseNode]):
-    for node in nodes:
-        yield node
+def _process_worker(step, nodes, output_queue: queue.Queue, **kwargs):
 
-def _process_worker(step, nodes, kwargs, output_queue: queue.Queue):
-    """Worker function that captures stdout and sends it to the queue."""
-    # Redirect stdout to a StringIO
-    # from io import StringIO
-    # old_stdout = sys.stdout
-    # sys.stdout = mystdout = StringIO()
+    from extend_tqdm import ExtTqdm
 
-    def _callback(node: BaseNode):
-        output_queue.put(node.id_)
+    def _callback(node: BaseNode | str):
+        # output_queue.put({
+        #     "node_id": node.id_, 
+        #     "traceback": traceback.format_stack()
+        # })
+        if isinstance(node, BaseNode):
+            output_queue.put(node.id_)
+        else:
+            output_queue.put(str)
 
     # try:
-        # Run the step
-    trackable_nodes = NodeTrackingSequence(nodes, _callback)
-    result = step(trackable_nodes, **kwargs)
-        
-        # Get the captured output
-        # output = mystdout.getvalue()
-        # if output:
-        #     output_queue.put(output)
-    
-    output_queue.put("\0")
-    if hasattr(result, '_sequence'):
+    # trackable_nodes = NodeTrackingSequence(nodes, _callback)
+    ExtTqdm._output_queue = output_queue
+    result = step(nodes, **kwargs)
+    # except Exception as e:
+    #     result = []
+    #     output_queue.put(f"!exception {str(e)}")
+
+    if isinstance(result, NodeTrackingSequence):
         return result._sequence
 
-    return result 
-    # finally:
-    #     del trackable_nodes
-        # Restore stdout
-        # sys.stdout = old_stdout
+    return result
 
 def run_step(
     nodes: Sequence[BaseNode],
     step: IngestionStep,
-    progressFn: Optional[Callable],
-    _parent_name: str = DEFAULT_PIPELINE_NAME,
     cache: Optional[IngestionCache] = None,
     cache_collection: Optional[str] = None,
     num_workers: int = 1,
+    _parent_name: str = DEFAULT_PIPELINE_NAME,
     **kwargs: Any,
 ) -> Sequence[BaseNode]:
 
@@ -227,7 +139,12 @@ def run_step(
 
     transform = step.transform
 
-    print(f"Step {step.name} | {num_workers} threads ({step.threads} step threads) | {num_nodes} nodes")
+    # print(f"Step {step.name} | {num_workers} threads ({step.threads} step threads) | {num_nodes} nodes")
+
+    progress_relay.start_task(
+        description=f"{step.name} | x{num_workers}",
+        total=num_nodes
+    )
 
     hash: str = ''
     if cache is not None:
@@ -247,24 +164,36 @@ def run_step(
             while True:
                 try:
                     output = output_queue.get()
-                    if output == "\0":
+
+                    if isinstance(output, BaseNode):
+                        # rich.print(output.id_)
+                        progress_relay.advance_progress()
+                    else:
+                        # rich.print(str(output)[:20])
+                        progress_relay.advance_progress()
+
+                    if output == EOQUEUE_SYMBOL:
                         break
-                    
-                    rich.print(output, end='')
+
                 except queue.Empty:
+                    # sleep(0.04)
                     continue
         
         output_thread = threading.Thread(target=process_output)
         output_thread.start()
         
-        step_work_pool = multiprocessing.Pool(num_workers)
+        step_work_pool = multiprocessing.get_context("spawn").Pool(num_workers)
 
         node_batches = ExtIngestionPipeline._node_batcher(
             num_batches=num_workers, nodes=nodes
         )
         
         # Create partial function with the output queue
-        worker_func = partial(_process_worker, step, kwargs=kwargs, output_queue=output_queue)
+        worker_func = partial(_process_worker, 
+            step, # nodes, ← expecting positional argument
+            output_queue=output_queue, # named kwargs
+            **kwargs # kwargs passed to TransformComponent
+        )
         
         nodes = list(
             itertools.chain.from_iterable(
@@ -275,15 +204,21 @@ def run_step(
             )
         )
         
+        output_queue.put(EOQUEUE_SYMBOL)
         # Wait for output processing to complete
+        output_thread.join()
         
-        
-    else: 
-        nodes = transform(nodes, **kwargs)
+    else:
+        """
+        Single-process
+        """
+        tracking_nodes = NodeTrackingSequence(nodes, lambda x:None)
+        nodes = transform(tracking_nodes, **kwargs)
 
     if cache is not None:
         cache.put(hash, nodes, collection=cache_collection)
 
+    progress_relay.end_task()
     return nodes
 
 class ExtIngestionPipeline(BaseModel):
@@ -529,6 +464,7 @@ class ExtIngestionPipeline(BaseModel):
         cache_collection: Optional[str] = None,
         store_doc_text: bool = True,
         num_workers: int = 1,
+        show_progress: bool = False,
         **kwargs: Any,
     ) -> Sequence[BaseNode]:
         """
@@ -601,7 +537,7 @@ class ExtIngestionPipeline(BaseModel):
                 cache=self.cache,
                 cache_collection=cache_collection,
                 num_workers=num_workers,
-                show_progress=True
+                show_progress=show_progress
             )
 
         if self.vector_store is not None:

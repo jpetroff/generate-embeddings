@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-import progress
+import extend_tqdm
 from tqdm.auto import tqdm
 import logging
 from typing import List
@@ -16,7 +16,6 @@ from rich import print
 from rich.console import Console
 from rich.logging import RichHandler
 
-# from ingest.old import SimpleIngestComponent, ParallelizedIngestComponent
 from ingest import IngestPipelineComponent
 from arguments import args, set_arg_config
 from connectors import defaults_from_config, init_storage_context

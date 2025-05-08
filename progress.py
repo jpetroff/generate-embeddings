@@ -1,48 +1,68 @@
-from typing import Any, Sequence
-from dataclasses import dataclass
-from typing import Dict, List, Set, Optional
+from typing import (
+    Optional
+)
 
-from importlib import reload
+from rich.console import Console, Group
+from rich.status import Status
+from rich.progress import Progress, TaskID
+from rich.live import Live
 
-# from rich import print
-# from rich.live import Live
-# from rich.console import Console
-from llama_index.core import Settings
-from datetime import time
-import uuid
+class ProgressRelay:
 
-import multiprocessing
+    console: Console
+    status: Status
+    progress: Progress
+    live: Live
+    default_task: TaskID
 
-from tqdm.asyncio import tqdm_asyncio
-from tqdm.rich import tqdm_rich
-import tqdm
-import tqdm.asyncio
-import tqdm.auto
-import sys
+    def __init__(self,
+        **kwargs
+    ):
+        pass
 
+    def init_step_context(self,
+        console: Console,
+        has_progress: bool = False,
+        total: Optional[int] = None, 
+        status: str = '',
+        **kwargs
+    ):
+        self.console = console
+        self.status = Status(status, **kwargs)
+        self.progress = Progress(**kwargs)
+        status_group= Group(
+            self.status,
+            self.progress
+        )
+        self.live = Live(
+            status_group,
+            console=self.console,
+            transient=True
+        )
+        self.live.start()
 
+    def end_step_context(self):
+        self.total = None
+        self.live.stop()
 
-SHR_NODE_ID_NAME = 'pipeline_share_node_id_progress'
+    def update_status(self, status: str, **kwargs):
+        self.status.update(status=status, **kwargs)
 
-class ExtTqdm(tqdm_asyncio):
-    def __init__(self, iterable=None, *args, **kwargs):
-        super().__init__(iterable, disable=True, *args, **kwargs)
-        # print('Updated with custom TQDM')
-        self._is_modified = True
+    def start_task(self, 
+        description: str = '', 
+        total: Optional[int] = None,
+        **kwargs
+    ):
+        self.default_task = self.progress.add_task(
+            description=description,
+            total=total
+        )
 
-    def __iter__(self):
-        """Backward-compatibility to use: for x in tqdm(iterable)"""
+    def advance_progress(self):
+        self.progress.advance(self.default_task)
 
-        # Inlining instance variables as locals (speed optimisation)
-        iterable = self.iterable
+    def end_task(self):
+        self.progress.remove_task(self.default_task)
 
-        for obj in iterable:
-            if 'SHARED_QUEUE' in globals() and SHARED_QUEUE is not None: # type: ignore
-                SHARED_QUEUE.put(str(obj)+"\n") # type: ignore
-
-            yield obj
-
-tqdm.asyncio.tqdm_asyncio = ExtTqdm
-tqdm.asyncio.tqdm = tqdm.asyncio.tqdm_asyncio
-reload(tqdm)
-reload(tqdm.auto)
+global_console = Console()
+progress_relay = ProgressRelay()

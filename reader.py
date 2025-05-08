@@ -191,33 +191,17 @@ class Reader:
         file_path: Path,
         **kwargs
     ) -> list[Document]:
-        # documents = Reader._load_file_to_documents(file_name, file_data)
-        # for document in documents:
-        #     document.metadata["file_name"] = file_name
-        # Reader._exclude_metadata(documents)
         documents = SimpleDirectoryReader.load_file(
             input_file=file_path,
             file_metadata=Reader.metadata,
             file_extractor=FILE_READER_CLS,
-            filename_as_id=True,
+            filename_as_id=False,
             **kwargs
         )
+        if len(documents) == 1:
+            documents[0].id_ = f"{file_path.name}"
+        else:
+            for i, document in enumerate(documents):
+                document.id_ = f"{file_path.name}#part{i}"
         Reader._exclude_metadata(documents)
         return documents
-
-    # @staticmethod
-    # def _load_file_to_documents(file_name: str, file_data: Path) -> list[Document]:
-    #     logger.debug("Transforming file_name=%s into documents", file_name)
-    #     extension = Path(file_name).suffix
-    #     reader_cls = FILE_READER_CLS.get(extension)
-    #     if reader_cls is None:
-    #         logger.debug(
-    #             "No reader found for extension=%s, using default string reader",
-    #             extension,
-    #         )
-    #         # Read as a plain text
-    #         string_reader = StringIterableReader()
-    #         return string_reader.load_data([file_data.read_text()])
-
-    #     logger.debug("Specific reader found for extension=%s", extension)
-    #     return reader_cls.load_data(file_data)
