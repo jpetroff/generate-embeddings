@@ -5,9 +5,10 @@ import fsspec
 from fsspec.implementations.local import LocalFileSystem
 import mimetypes
 import os
-from typing import List, Iterator, Optional, Tuple
-from multiprocessing import Process, Queue
+from typing import List, Iterator, Optional, Tuple, Dict
+from threading import Thread, Lock
 import queue
+import time
 
 from llama_index.core.readers import StringIterableReader
 from llama_index.core.readers.base import BaseReader
@@ -15,7 +16,8 @@ from llama_index.core.readers.json import JSONReader
 from llama_index.core.schema import Document
 from llama_index.readers.web import SimpleWebPageReader
 from llama_index.core import SimpleDirectoryReader
-from llama_index.core.readers.file.base import default_file_metadata_func
+
+from modules.progress import progress_relay, global_console
 
 logger = logging.getLogger('generate-app')
 
@@ -107,97 +109,103 @@ def get_default_fs() -> fsspec.AbstractFileSystem:
 class Reader:
     """Helper class to transform files into documents with background processing.
 
-    This class processes multiple files in the background and provides an iterator
-    interface to access the documents. It maintains a queue of documents and processes
-    files one at a time to manage memory efficiently.
+    This class processes multiple files in parallel (up to 3 at a time) and maintains
+    a buffer of processed documents in memory. It provides an iterator interface to
+    access the documents efficiently.
     """
 
-    def __init__(self, file_paths: List[Path]):
+    def __init__(self, file_paths: List[Path], max_parallel_files: int = 3):
         self._file_paths = file_paths
         self._current_file_index = 0
-        self._document_queue: Optional[Queue] = None
-        self._loading_process: Optional[Process] = None
-        self._error_queue: Queue = Queue()
+        self._max_parallel_files = max_parallel_files
+        self._processing_threads: List[Thread] = []
+        self._thread_file_map: Dict[int, Path] = {}  # Map thread IDs to file paths
+        self._result_dict: Dict[str, List[Document]] = {}
+        self._result_lock = Lock()
+        self._error_queue: queue.Queue = queue.Queue()
+        self._processed_files: List[Tuple[Path, List[Document]]] = []
         self._is_processing = False
-        self._current_file_path: Optional[Path] = None
 
     def _load_documents_in_background(self, file_path: Path, **kwargs):
-        """Load documents in a background process and put them in a queue as a batch."""
-        if self._document_queue is None:
-            return
-            
+        """Load documents in a background thread and store results in shared dict."""
         try:
             documents = self.transform_file_into_documents(file_path, **kwargs)
-
-            # Put all documents from the file as a single batch along with the file path
-            self._document_queue.put((file_path, documents))
-            self._document_queue.put(None)  # Signal end of current file
+            with self._result_lock:
+                self._result_dict[str(file_path)] = documents
         except Exception as e:
             logger.error(f"Error loading documents from {file_path}: {e}")
-            self._error_queue.put(e)
-            self._document_queue.put(None)
+            self._error_queue.put((str(file_path), str(e)))
 
-    def _start_processing_next_file(self, **kwargs) -> bool:
-        """Start processing the next file in the background if available."""
-        if self._current_file_index >= len(self._file_paths):
-            return False
+    def _start_processing_files(self, **kwargs) -> None:
+        """Start processing up to max_parallel_files files in the background."""
+        while (len(self._processing_threads) < self._max_parallel_files and 
+               self._current_file_index < len(self._file_paths)):
+            
+            file_path = self._file_paths[self._current_file_index]
+            thread = Thread(
+                target=self._load_documents_in_background,
+                args=(file_path,),
+                kwargs=kwargs
+            )
+            
+            self._processing_threads.append(thread)
+            self._thread_file_map[id(thread)] = file_path
+            thread.start()
+            self._current_file_index += 1
 
-        # Clean up any existing process
-        if self._loading_process is not None:
-            self._loading_process.terminate()
-            self._loading_process.join()
+    def _check_processed_files(self) -> None:
+        """Check for completed file processing and move results to buffer."""
+        completed_indices = []
+        for i, thread in enumerate(self._processing_threads):
+            if not thread.is_alive():
+                thread.join()
+                file_path = self._thread_file_map[id(thread)]
+                with self._result_lock:
+                    if str(file_path) in self._result_dict:
+                        documents = self._result_dict[str(file_path)]
+                        self._processed_files.append((file_path, documents))
+                        del self._result_dict[str(file_path)]
+                del self._thread_file_map[id(thread)]
+                completed_indices.append(i)
         
-        # Create new queue and process
-        self._document_queue = Queue()
-        self._loading_process = Process(
-            target=self._load_documents_in_background,
-            args=(self._file_paths[self._current_file_index],),
-            kwargs=kwargs
-        )
-        self._loading_process.start()
-        self._is_processing = True
-        self._current_file_index += 1
-        return True
+        # Remove completed threads in reverse order to avoid index issues
+        for i in sorted(completed_indices, reverse=True):
+            self._processing_threads.pop(i)
 
     def _wait_for_document(self, timeout: float = 0.1) -> Optional[Tuple[Path, List[Document]]]:
         """Wait for documents from the queue, handling process completion."""
-        if self._document_queue is None:
-            return None
+        if not self._is_processing and self._current_file_index == 0:
+            self._start_processing_files()
+            self._is_processing = True
+
+        progress_relay.init_step_context(
+            console=global_console, 
+            status=f'[dim]Preparing files (remaining files: {len(self._file_paths) - self._current_file_index}, available in buffer: {len(self._processed_files)}, active threads: {len(self._processing_threads)})[/]'
+        )
 
         while True:
-            try:
-                batch = self._document_queue.get(timeout=timeout)
-                if batch is None:  # End of current file
-                    self._is_processing = False
-                    if self._loading_process is not None:
-                        self._loading_process.join()
-                    # Check for errors
-                    try:
-                        error = self._error_queue.get_nowait()
-                        raise RuntimeError(f"Error processing file: {error}")
-                    except queue.Empty:
-                        pass
-                    # Start processing next file if available
-                    if not self._start_processing_next_file():
-                        return None
-                    continue  # Try to get the next batch
-                return batch
-            except queue.Empty:
-                if not self._is_processing:
-                    # If we're not processing and the queue is empty, check if we have more files
-                    if self._current_file_index < len(self._file_paths):
-                        if self._start_processing_next_file():
-                            continue  # Try to get the next batch
-                    return None
-                # If we're still processing, wait a bit and try again
-                continue
+            # Check for any completed files
+            self._check_processed_files()
+
+            # If we still have files to process, start them
+            if self._current_file_index < len(self._file_paths):
+                self._start_processing_files()
+
+            # If we have processed files in buffer, return the next one
+            if self._processed_files:
+                progress_relay.end_step_context()
+                return self._processed_files.pop(0)
+
+            # If we have no more files and all threads are done
+            if not self._processing_threads and self._current_file_index >= len(self._file_paths):
+                progress_relay.end_step_context(message="[dim]- Done[/]")
+                return None
+
+            # Wait a bit and try again
+            time.sleep(timeout)
 
     def get_next_document(self, timeout: float = 0.1) -> Optional[Tuple[Path, List[Document]]]:
         """Get all documents from the next file in the queue, waiting if necessary."""
-        if self._current_file_index == 0 and not self._is_processing:
-            if not self._start_processing_next_file():
-                return None
-        
         return self._wait_for_document(timeout)
 
     def __iter__(self) -> Iterator[Tuple[Path, List[Document]]]:
@@ -210,6 +218,12 @@ class Reader:
         if batch is None:
             raise StopIteration
         return batch
+
+    def __del__(self):
+        """Clean up threads when the reader is destroyed."""
+        for thread in self._processing_threads:
+            if thread.is_alive():
+                thread.join()
 
     @staticmethod
     def metadata(

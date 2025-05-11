@@ -123,24 +123,21 @@ class IngestPipelineComponent(BaseIngestComponent):
                 raised_exception = e
 
             finally:
-                time_elapsed = progress_relay.end_step_context()
                 if raised_exception is not None:
-                    global_console.print(
-                        f"[red]![/] Failed [red]{file_name}[/] "
-                        f"[dim]{time_elapsed}s[/] "
-                        f"[dim][red]{str(raised_exception)}[/] "
+                    end_message = (
+                        f"[red]![/] Failed [red]{file_name}[/]\n"
+                        f"\u2514\u2500 [dim][red]{str(raised_exception)}[/]"
                     )
                 elif generated_nodes and len(generated_nodes) > 0:
-                    global_console.print(
-                        f"[green]✓[/] Completed [green]{file_name}[/] "
-                        f"[dim]{time_elapsed}s[/] "
-                        f"[dim]{len(returned_documents)}→{len(generated_nodes)}→{len(generated_nodes_with_embeddings)}[/] "
+                    end_message = (
+                        f"[green]✓[/] Completed [green]{file_name}[/]\n"
+                        f"\u2514\u2500 [dim]New documents: {len(returned_documents)} → Nodes: {len(generated_nodes)} → With embeddings: {len(generated_nodes_with_embeddings)}[/]"
                     )
                 else:
-                    global_console.print(
-                        f"[blue]•[/] Skipped [blue]{file_name}[/] "
-                        f"[dim]{time_elapsed}s[/]"
+                    end_message = (
+                        f"[blue]•[/] Skipped [blue]{file_name}[/]"
                     )
+                progress_relay.end_step_context(message=end_message)
 
     def _save_docs(self, documents: List[Document]) -> tuple[Sequence[Document], Sequence[BaseNode], Sequence[BaseNode]]:
         logger.debug("Transforming count=%s documents into nodes", len(documents))

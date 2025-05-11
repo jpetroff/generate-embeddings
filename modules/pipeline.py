@@ -112,14 +112,14 @@ def run_step(
 ) -> Sequence[BaseNode]:
 
     num_nodes = len(nodes)
-    num_workers = min(int(step.threads or inf), num_workers)
-    is_multiprocessing = num_nodes > 1 and num_workers > 1
+    num_workers = min(int(step.threads or inf), num_workers, num_nodes)
+    is_multiprocessing = num_workers > 1
 
     transform = step.transform
 
     if progress_relay.is_active_task:
         progress_relay.start_task(
-            description=f"{step.name}[dim]@x{num_workers}[/]",
+            description=f"{step.name}[dim] x{num_workers}[/]",
             total=num_nodes
         )
 
@@ -521,7 +521,7 @@ class ExtIngestionPipeline(BaseModel):
         if len(nodes_to_run) == 0:
             return [], []
         
-        nodes_to_save = nodes_to_run
+        docs_to_save = nodes_to_run
         
         if progress_relay.is_active_task:
             progress_relay.update_status(f"Generating embeddings for {len(input_nodes)} documents")
@@ -545,8 +545,8 @@ class ExtIngestionPipeline(BaseModel):
         if (self.vector_store is not None) and nodes_with_embeddings:
             self.vector_store.add(nodes_with_embeddings)
 
-        # if self.docstore is not None:
-        #     self.docstore.set_document_hashes({n.id_: n.hash for n in nodes_to_save})
-        #     self.docstore.add_documents(nodes_to_save, store_text=store_doc_text)
+        if self.docstore is not None:
+            self.docstore.set_document_hashes({n.id_: n.hash for n in docs_to_save})
+            self.docstore.add_documents(docs_to_save, store_text=store_doc_text)
 
         return nodes_to_run, nodes_with_embeddings

@@ -1,3 +1,4 @@
+from enum import Enum
 from typing import (
     Optional,
     Any
@@ -9,6 +10,14 @@ from rich.progress import Progress, TaskID, TextColumn, BarColumn, MofNCompleteC
 from rich.live import Live
 
 from time import time
+
+class OP_CODE(str, Enum):
+    SUCCESS = 'ended:success'
+    SKIPPED = 'ended:skipped'
+    PARTIAL = 'ended:partial'
+    ERROR = 'ended:error'
+    PROGRESS = 'progress'
+
 
 class ProgressRelay:
 
@@ -52,16 +61,20 @@ class ProgressRelay:
         self.live = Live(
             status_group,
             console=self.console,
-            transient=True
+            transient=True,
+            refresh_per_second=10
         )
         self.live.start()
 
-    def end_step_context(self):
+    def end_step_context(self, message: str = '', **kwargs):
         self.total = None
-        self.is_active_task = True
+        self.is_active_task = False
         self.append = ''
         self.live.stop()
-        return round(time() - self.step_time, 2)
+        _elapsed_time = round(time() - self.step_time, 2)
+        if message != '':
+            self.console.print(f"{message} [dim]{_elapsed_time}s[/]")
+        return _elapsed_time
 
     def update_status(self, status: str, **kwargs):
         self.status.update(status=f"{status} {self.append}", **kwargs)
@@ -81,8 +94,10 @@ class ProgressRelay:
         task_id = kwargs['task_id'] if hasattr(kwargs, 'task_id') else self.default_task
         self.progress.advance(task_id, **kwargs)
 
-    def end_task(self, **kwargs):
+    def end_task(self, message: str = '', **kwargs):
         task_id = kwargs['task_id'] if hasattr(kwargs, 'task_id') else self.default_task
+        if message != '':
+            self.progress.print(f"{message} [dim]{round(time() - self.step_time, 2)}s[/]")
         self.progress.remove_task(task_id)
 
 

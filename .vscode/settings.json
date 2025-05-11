@@ -1,5 +1,6 @@
 {
     "cSpell.words": [
         "docstore"
-    ]
+    ],
+    "python.REPL.enableREPLSmartSend": false
 }
