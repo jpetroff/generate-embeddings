@@ -1,4 +1,5 @@
 from importlib import reload
+from operator import call
 from typing import Callable, Optional
 
 from pkg_resources import UnknownExtra
@@ -7,12 +8,13 @@ from tqdm.asyncio import tqdm_asyncio
 import tqdm
 import tqdm.asyncio
 import tqdm.auto
-from node_tracking_sequence import NodeTrackingSequence
+from modules.node_tracking_sequence import NodeTrackingSequence
 import queue
 
 class ExtTqdm(tqdm_asyncio):
 
     _output_queue: Optional[queue.Queue] = None
+    _output_fn: Optional[Callable] = None
 
     def __init__(self, iterable=None, *args, **kwargs):
         super().__init__(iterable, disable=True, *args, **kwargs)
@@ -26,8 +28,10 @@ class ExtTqdm(tqdm_asyncio):
         iterable = self.iterable
 
         for obj in iterable:
-            if hasattr(self, '_output_queue'):
+            if hasattr(self, '_output_queue') and self._output_queue is not None:
                 self._output_queue.put(obj)  # type: ignore
+            if hasattr(self, '_output_fn') and callable(self._output_fn):
+                self._output_fn(obj)  # type: ignore
             yield obj
 
 

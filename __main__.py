@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 
-import extend_tqdm
+# import to reload definition of tqdm
+import math
+import modules.extend_tqdm
+
+
 from tqdm.auto import tqdm
 import logging
 from typing import List
@@ -11,20 +15,21 @@ from pathlib import Path
 from llama_index.core.storage.storage_context import StorageContext
 from llama_index.core import Settings
 
-import inquirer
-from rich import print
-from rich.console import Console
+from time import time
+
 from rich.logging import RichHandler
 
-from ingest import IngestPipelineComponent
-from arguments import args, set_arg_config
-from connectors import defaults_from_config, init_storage_context
-from interactive import ask_before_connects, ask_or_get_files
-from env import set_env_config
+from modules.ingest import IngestPipelineComponent
+from modules.arguments import args, set_arg_config
+from modules.connectors import defaults_from_config, init_storage_context
+from modules.interactive import ask_before_connects, ask_or_get_files, ask_to_confirm
+from modules.env import set_env_config
 
 from transforms.llama_settings import update_llama_settings
 from transforms.node_parser import node_parser
 from transforms.embed_model import update_embed_model
+
+from modules.progress import global_console
 
 @dataclass
 class user_config:
@@ -46,8 +51,8 @@ if __name__ == "__main__":
 
     print(tqdm) # type: ignore
 
-    console = Console(log_time=False)
-    console.clear(home=True)  #clear screen
+
+    global_console.clear(home=True)  #clear screen
 
     # Read args as first priority
     set_arg_config(config=user_config)
@@ -72,14 +77,14 @@ if __name__ == "__main__":
     ask_or_get_files(args, user_config)
     
 
-    # print(f"Using embedding model [purple]{env['EMBED_MODEL']}[/] at [yellow]{env['OLLAMA_URL']}[/]")
-    # print(f"Writing to vector collection [purple]{env['QDRANT_COLLECTION']}[/] at [yellow]{env['QDRANT_URL']}[/]")
-    if not user_config.non_interactive_mode:
-        confirm_collection = inquirer.confirm(
-            message="Confirm?",
-            default=True
-        )
-        confirm_collection or exit(0)  # type: ignore
+    global_console.print(
+        f"Using embedding model [yellow]{user_config.EMBED_MODEL}[/]\n"
+        f"Collection name [yellow]{user_config.COLLECTION_NAME}[/]\n" # type: ignore
+        f"Vector storage [purple]{user_config.QDRANT_URL}[/]\n" # type: ignore
+        f"Document storage [purple]{user_config.MONGO_URI}[/]" # type: ignore
+    )
+    request_confirmation = ask_to_confirm(args=args, config=user_config)
+    global_console.print("\n")
 
     # Set to 'DEBUG' to have extensive logging turned on, even for libraries
     LOG_LEVEL: str = user_config.LOG_LEVEL or "CRITICAL" # type: ignore
@@ -112,11 +117,14 @@ if __name__ == "__main__":
     )
 
     try:
+        files = [(str(p.name), p) for p in user_config.ingest_files]
+        global_console.print(f"[dim]- Starting ingestion for {len(files)} files[/]")
         ingest_service.bulk_ingest(
-            files=[(str(p.name), p) for p in user_config.ingest_files]
+            files=files,
+            buffer_transforms=4
         )
         
     finally:
         del ingest_service
 
-    print("Done")
+    global_console.print("[dim]- Done[/]")

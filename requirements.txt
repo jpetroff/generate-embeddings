@@ -14,4 +14,6 @@ llama-index-storage-index-store-mongodb
 pydantic
 dotenv
 rich
-inquirer 
+inquirer
+EbookLib
+html2text

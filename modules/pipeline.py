@@ -1,18 +1,14 @@
 from math import inf
-import multiprocessing
 import multiprocessing.pool
 import itertools
 from enum import Enum
 from functools import partial, reduce
-from itertools import repeat
-from os import wait
+from operator import mod
 from pathlib import Path
 from time import sleep
-import trace
-from typing import Any, Callable, Generator, List, Optional, Sequence, Union, Dict
+from typing import Any, Callable, Generator, List, Optional, Sequence, Union
 import queue
 import threading
-import traceback
 
 from fsspec import AbstractFileSystem
 
@@ -25,9 +21,7 @@ from llama_index.core.ingestion.cache import DEFAULT_CACHE_NAME, IngestionCache
 from llama_index.core.readers.base import ReaderConfig
 from llama_index.core.schema import (
     BaseNode,
-    BaseComponent,
     Document,
-    MetadataMode,
     TransformComponent,
 )
 from llama_index.core.settings import Settings
@@ -38,12 +32,11 @@ from llama_index.core.storage.docstore.types import DEFAULT_PERSIST_FNAME
 from llama_index.core.utils import concat_dirs
 from llama_index.core.vector_stores.types import BasePydanticVectorStore
 
-import rich
+from modules.extend_tqdm import ExtTqdm
+from modules.node_tracking_sequence import NodeTrackingSequence
+from modules.utils import EOQUEUE_SYMBOL, get_transformation_hash
+from modules.progress import progress_relay, global_console
 
-from node_tracking_sequence import NodeTrackingSequence
-from utils import EOQUEUE_SYMBOL, get_transformation_hash
-
-from progress import progress_relay, global_console
 
 class IngestionStep(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
@@ -98,25 +91,10 @@ class IngestionStrategy(str, Enum):
 
 def _process_worker(step, nodes, output_queue: queue.Queue, **kwargs):
 
-    from extend_tqdm import ExtTqdm
+    from modules.extend_tqdm import ExtTqdm
 
-    def _callback(node: BaseNode | str):
-        # output_queue.put({
-        #     "node_id": node.id_, 
-        #     "traceback": traceback.format_stack()
-        # })
-        if isinstance(node, BaseNode):
-            output_queue.put(node.id_)
-        else:
-            output_queue.put(str)
-
-    # try:
-    # trackable_nodes = NodeTrackingSequence(nodes, _callback)
     ExtTqdm._output_queue = output_queue
     result = step(nodes, **kwargs)
-    # except Exception as e:
-    #     result = []
-    #     output_queue.put(f"!exception {str(e)}")
 
     if isinstance(result, NodeTrackingSequence):
         return result._sequence
@@ -139,12 +117,11 @@ def run_step(
 
     transform = step.transform
 
-    # print(f"Step {step.name} | {num_workers} threads ({step.threads} step threads) | {num_nodes} nodes")
-
-    progress_relay.start_task(
-        description=f"{step.name} | x{num_workers}",
-        total=num_nodes
-    )
+    if progress_relay.is_active_task:
+        progress_relay.start_task(
+            description=f"{step.name}[dim]@x{num_workers}[/]",
+            total=num_nodes
+        )
 
     hash: str = ''
     if cache is not None:
@@ -163,26 +140,20 @@ def run_step(
         def process_output():
             while True:
                 try:
-                    output = output_queue.get()
-
-                    if isinstance(output, BaseNode):
-                        # rich.print(output.id_)
-                        progress_relay.advance_progress()
-                    else:
-                        # rich.print(str(output)[:20])
-                        progress_relay.advance_progress()
+                    output = output_queue.get_nowait()
 
                     if output == EOQUEUE_SYMBOL:
-                        break
+                        return 0
+                    else:
+                        progress_relay.advance_progress(result=output)
 
                 except queue.Empty:
-                    # sleep(0.04)
                     continue
         
         output_thread = threading.Thread(target=process_output)
         output_thread.start()
         
-        step_work_pool = multiprocessing.get_context("spawn").Pool(num_workers)
+        step_work_pool = multiprocessing.Pool(num_workers)
 
         node_batches = ExtIngestionPipeline._node_batcher(
             num_batches=num_workers, nodes=nodes
@@ -212,13 +183,15 @@ def run_step(
         """
         Single-process
         """
-        tracking_nodes = NodeTrackingSequence(nodes, lambda x:None)
-        nodes = transform(tracking_nodes, **kwargs)
+        ExtTqdm._output_fn = lambda _,obj: progress_relay.advance_progress()
+        nodes = transform(nodes, **kwargs)
+        ExtTqdm._output_fn = None
 
     if cache is not None:
         cache.put(hash, nodes, collection=cache_collection)
 
-    progress_relay.end_task()
+    if progress_relay.is_active_task:
+        progress_relay.end_task()
     return nodes
 
 class ExtIngestionPipeline(BaseModel):
@@ -395,11 +368,11 @@ class ExtIngestionPipeline(BaseModel):
         nodes_to_run = []
         for node in nodes:
             if node.hash not in existing_hashes and node.hash not in current_hashes:
-                self.docstore.set_document_hash(node.id_, node.hash)
+                # self.docstore.set_document_hash(node.id_, node.hash)
                 nodes_to_run.append(node)
                 current_hashes.append(node.hash)
 
-        #self.docstore.add_documents(nodes_to_run, store_text=store_doc_text)
+        # self.docstore.add_documents(nodes_to_run, store_text=store_doc_text)
 
         return nodes_to_run
     
@@ -443,8 +416,8 @@ class ExtIngestionPipeline(BaseModel):
                     self.vector_store.delete(ref_doc_id)
 
         nodes_to_run = list(deduped_nodes_to_run.values())
-        self.docstore.set_document_hashes({n.id_: n.hash for n in nodes_to_run})
-        self.docstore.add_documents(nodes_to_run, store_text=store_doc_text)
+        # self.docstore.set_document_hashes({n.id_: n.hash for n in nodes_to_run})
+        # self.docstore.add_documents(nodes_to_run, store_text=store_doc_text)
 
         return nodes_to_run
     
@@ -452,10 +425,27 @@ class ExtIngestionPipeline(BaseModel):
     def _node_batcher(
         num_batches: int, nodes: Union[Sequence[BaseNode], List[Document]]
     ) -> Generator[Union[Sequence[BaseNode], List[Document]], Any, Any]:
-        """Yield successive n-sized chunks from lst."""
-        batch_size = max(1, int(len(nodes) / num_batches))
-        for i in range(0, len(nodes), batch_size):
-            yield nodes[i : i + batch_size]
+        if not nodes:
+            return
+            
+        # Calculate base batch size and remainder
+        total_nodes = len(nodes)
+        base_batch_size = total_nodes // num_batches
+        remainder = total_nodes % num_batches
+        
+        # Calculate start indices for each batch
+        start_indices = [0]
+        current_index = 0
+        
+        # Distribute remainder nodes across batches
+        for i in range(num_batches):
+            batch_size = base_batch_size + (1 if i < remainder else 0)
+            current_index += batch_size
+            start_indices.append(current_index)
+            
+        # Yield batches
+        for i in range(num_batches):
+            yield nodes[start_indices[i]:start_indices[i + 1]]
 
     def run(
         self,
@@ -466,7 +456,7 @@ class ExtIngestionPipeline(BaseModel):
         num_workers: int = 1,
         show_progress: bool = False,
         **kwargs: Any,
-    ) -> Sequence[BaseNode]:
+    ) -> tuple[Sequence[BaseNode], Sequence[BaseNode]]:
         """
         Run a series of transformations on a set of nodes.
 
@@ -489,6 +479,9 @@ class ExtIngestionPipeline(BaseModel):
         """
 
         input_nodes = self._prepare_inputs(documents, nodes)
+
+        if progress_relay.is_active_task:
+            progress_relay.update_status(f"Checking {len(input_nodes)} docs for duplicated")
 
         # check if we need to dedup
         if self.docstore is not None and self.vector_store is not None:
@@ -525,8 +518,13 @@ class ExtIngestionPipeline(BaseModel):
         else:
             nodes_to_run = input_nodes
 
-        # @TODO: remove, used for debugging
-        nodes_to_run = input_nodes
+        if len(nodes_to_run) == 0:
+            return [], []
+        
+        nodes_to_save = nodes_to_run
+        
+        if progress_relay.is_active_task:
+            progress_relay.update_status(f"Generating embeddings for {len(input_nodes)} documents")
 
         for step in self.steps:
             nodes_to_run = run_step(
@@ -540,9 +538,15 @@ class ExtIngestionPipeline(BaseModel):
                 show_progress=show_progress
             )
 
-        if self.vector_store is not None:
-            nodes_with_embeddings = [n for n in nodes_to_run if n.embedding is not None]
-            if nodes_with_embeddings:
-                self.vector_store.add(nodes_with_embeddings)
+        """
+        Add transformation to indices
+        """
+        nodes_with_embeddings = [n for n in nodes_to_run if n.embedding is not None]
+        if (self.vector_store is not None) and nodes_with_embeddings:
+            self.vector_store.add(nodes_with_embeddings)
 
-        return nodes_to_run
+        # if self.docstore is not None:
+        #     self.docstore.set_document_hashes({n.id_: n.hash for n in nodes_to_save})
+        #     self.docstore.add_documents(nodes_to_save, store_text=store_doc_text)
+
+        return nodes_to_run, nodes_with_embeddings
